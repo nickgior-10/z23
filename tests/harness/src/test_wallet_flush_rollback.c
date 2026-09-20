@@ -238,7 +238,41 @@ static int test_flush_tx_write_failure_rolls_back(void)
     return failures;
 }
 
-/* ── Test 3: legacy bool wrapper propagates the rollback ───────── */
+/* ── Test 3: legacy bool wrapper preserves successful persistence ─ */
+
+static int test_flush_bool_wrapper_returns_true(void)
+{
+    int failures = 0;
+    TEST("flush_rollback: bool wrapper returns true after a committed flush") {
+        unsetenv("ZCL_WALLET_PASSPHRASE");
+        sqlite3 *db = open_flush_db(/*install_tx_trigger=*/false);
+        ASSERT(db);
+
+        struct wallet_sqlite ws;
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+
+        struct wallet *w = alloc_wallet_t();
+        ASSERT(w);
+
+        struct privkey k;
+        struct pubkey pk;
+        make_key(&k, &pk, 0x60);
+        ASSERT(keystore_add_key(&w->keystore, &k));
+        seed_wallet_tx(w);
+
+        ASSERT(wallet_sqlite_flush(&ws, w));
+        ASSERT_EQ(count_rows(db, "wallet_keys"), 1);
+        ASSERT_EQ(count_rows(db, "wallet_transactions"), 1);
+
+        wallet_sqlite_close(&ws);
+        sqlite3_close(db);
+        free_wallet_t(w);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── Test 4: legacy bool wrapper propagates the rollback ───────── */
 
 static int test_flush_bool_wrapper_returns_false(void)
 {
@@ -282,6 +316,7 @@ int test_wallet_flush_rollback(void)
     int failures = 0;
     failures += test_flush_clean_commits_everything();
     failures += test_flush_tx_write_failure_rolls_back();
+    failures += test_flush_bool_wrapper_returns_true();
     failures += test_flush_bool_wrapper_returns_false();
     return failures;
 }

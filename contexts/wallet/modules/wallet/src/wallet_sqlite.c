@@ -1564,6 +1564,7 @@ bool wallet_sqlite_flush(struct wallet_sqlite *ws, struct wallet *w)
     LOG_FAIL("wallet_sqlite", "code=%d (%s:%d) %s",
              r.code,
              r.source_file ? r.source_file : "?", r.source_line, r.message);
+    return false;
 }
 
 /* ── Health snapshot ───────────────────────────────────────────── */
