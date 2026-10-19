@@ -66,11 +66,15 @@ static void syncsvc_build_locator_from_tip(struct block_locator *loc,
         }
         loc->vhave[idx++] = *walk->phashBlock;
 
-        const struct block_index *prev = walk;
-        for (int i = 0; i < step && walk; i++)
-            walk = walk->pprev;
-        if (walk == prev)
-            break;
+        /* The exponential locator needs only the sampled ancestors, not
+         * every intervening block. Reuse the block index's skip pointers;
+         * get_ancestor falls back to pprev when skips are not built yet.
+         * A step past genesis still terminates here (the caller appends
+         * genesis), preserving the existing locator sequence. */
+        walk = walk->nHeight >= step
+            ? block_index_get_ancestor((struct block_index *)walk,
+                                       walk->nHeight - step)
+            : NULL;
 
         /* Keep the first 12 hashes dense (step=1) for better fork
          * detection near the tip, then double every step after. */
