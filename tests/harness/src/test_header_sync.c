@@ -4,6 +4,8 @@
 
 #include "test/test_core.h"
 #include "chain/pow.h"
+#include "chain/chain.h"
+#include "validation/chainstate.h"
 #include "net/net.h"
 #include "sync/sync_planner.h"
 
@@ -21,9 +23,92 @@ static struct p2p_node make_test_node(int starting_height, int64_t last_gh_time)
     return n;
 }
 
+/* Differential oracle: preserve the original pprev-only locator sequence,
+ * including the dense prefix, step doubling and appended genesis hash. */
+static bool locator_matches_linear_walk(const struct block_locator *loc,
+                                         const struct block_index *tip,
+                                         const struct uint256 *genesis)
+{
+    size_t count = 0;
+    int step = 1;
+    int samples = 0;
+    while (tip && tip->phashBlock && count < MAX_LOCATOR_HASHES) {
+        if (count >= loc->num_hashes ||
+            !uint256_eq(&loc->vhave[count], tip->phashBlock))
+            return false;
+        count++;
+        for (int i = 0; i < step && tip; i++)
+            tip = tip->pprev;
+        if (++samples > 12 && step < 1048576)
+            step *= 2;
+    }
+    if (count > 0 && uint256_eq(&loc->vhave[count - 1], genesis))
+        return count == loc->num_hashes;
+    return count + 1 == loc->num_hashes &&
+           uint256_eq(&loc->vhave[count], genesis);
+}
+
+static bool locator_sample_matches(const struct active_chain *empty,
+                                    const struct block_index *tip,
+                                    const struct uint256 *genesis,
+                                    bool fallback)
+{
+    struct block_locator loc;
+    struct zcl_result r = syncsvc_build_getheaders_locator(
+        &loc, empty, fallback ? NULL : tip,
+        fallback ? tip : NULL, genesis);
+    bool ok = r.ok && locator_matches_linear_walk(&loc, tip, genesis);
+    block_locator_free(&loc);
+    return ok;
+}
+
+static int test_header_locator_skip_parity(void)
+{
+    enum { BLOCKS = 8193 };
+    struct block_index *blocks = calloc(BLOCKS, sizeof(*blocks));
+    struct uint256 *hashes = calloc(BLOCKS, sizeof(*hashes));
+    if (!blocks || !hashes) {
+        fprintf(stderr, "header locator fixture allocation failed\n");
+        free(blocks);
+        free(hashes);
+        return 1;
+    }
+    const int tips[] = {0, 1, 12, 13, 14, 31, 32, 1024, BLOCKS - 1};
+    bool ok = true;
+    struct active_chain empty;
+    active_chain_init(&empty);
+    for (int i = 0; i < BLOCKS; i++) {
+        block_index_init(&blocks[i]);
+        memcpy(hashes[i].data, &i, sizeof(i));
+        blocks[i].phashBlock = &hashes[i];
+        blocks[i].nHeight = i;
+        blocks[i].pprev = i > 0 ? &blocks[i - 1] : NULL;
+    }
+    for (int skips = 0; skips < 2; skips++) {
+        for (int i = 0; i < BLOCKS; i++) {
+            if (skips)
+                block_index_build_skip(&blocks[i]);
+        }
+        for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+            for (int fallback = 0; fallback < 2; fallback++) {
+                const struct block_index *tip = &blocks[tips[i]];
+                ok = locator_sample_matches(&empty, tip, &hashes[0],
+                                             fallback != 0) && ok;
+            }
+        }
+    }
+    active_chain_free(&empty);
+    free(blocks);
+    free(hashes);
+    printf("header_sync: locator matches linear walk with/without skips... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_header_sync(void)
 {
     int failures = 0;
+    failures += test_header_locator_skip_parity();
 
     /* ── 1. IBD base interval is 10s ──────────────────────── */
     printf("header_sync: IBD base interval 10s... ");
