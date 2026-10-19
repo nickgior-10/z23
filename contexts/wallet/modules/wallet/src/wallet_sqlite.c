@@ -115,35 +115,6 @@ static bool is_wks1_blob(const void *data, size_t len)
     return hit;
 }
 
-/* Encrypt `plain` (plen bytes) into a malloc'd envelope.  Sets
- * *out and *out_len on success; caller must free *out.  Returns
- * false on any encryption failure (out stays NULL). */
-static bool wallet_encrypt_blob(const uint8_t *plain, size_t plen,
-                                 uint8_t **out, size_t *out_len)
-{
-    *out = NULL;
-    *out_len = 0;
-    const char *pass = wallet_passphrase();
-    if (!pass) return false;
-
-    size_t cap = wks_envelope_size(plen);
-    uint8_t *buf = zcl_malloc(cap, "wallet_encrypt_buf");
-    if (!buf) return false;
-
-    size_t elen = 0;
-    if (!wks_encrypt(plain, plen, pass, wks_default_iterations(),
-                     buf, cap, &elen)) {
-        free(buf);
-        return false;
-    }
-    /* This wallet wraps key material at rest — tell the lock subsystem so a
-     * runtime lock is meaningful (a plaintext wallet has nothing to lock). */
-    wallet_lock_note_encrypted_at_rest();
-    *out = buf;
-    *out_len = elen;
-    return true;
-}
-
 /* Decrypt a WKS1 envelope into a malloc'd plaintext.  Sets *out
  * and *out_len on success; caller must memory_cleanse+free *out.
  * Returns false on wrong passphrase / tampered data. */
@@ -970,10 +941,13 @@ bool wallet_sqlite_write_sapling_seed(struct wallet_sqlite *ws,
 
     uint8_t *enc_blob = NULL;
     size_t enc_len = 0;
-    bool encrypted = wallet_encrypt_blob(seed, 32, &enc_blob, &enc_len);
+    struct zcl_result wrapped = wsql_fail(
+        ws, wsql_encrypt_secret(seed, 32, &enc_blob, &enc_len));
+    if (!wrapped.ok)
+        LOG_FAIL("wallet_sqlite", "write_sapling_seed: %s", wrapped.message);
 
     sqlite3_reset(ws->stmt_seed_write);
-    if (encrypted)
+    if (enc_blob)
         sqlite3_bind_blob(ws->stmt_seed_write, 1,
                           enc_blob, (int)enc_len, SQLITE_TRANSIENT);
     else
@@ -1066,14 +1040,15 @@ bool wallet_sqlite_write_sapling_key(struct wallet_sqlite *ws,
     uint8_t *enc_xsk = NULL;
     size_t enc_xsk_len = 0;
     size_t xsk_raw_len = sizeof(struct zip32_xsk);
-    bool encrypted = wallet_encrypt_blob((const uint8_t *)&entry->xsk,
-                                          xsk_raw_len,
-                                          &enc_xsk, &enc_xsk_len);
+    struct zcl_result wrapped = wsql_fail(ws, wsql_encrypt_secret(
+        (const uint8_t *)&entry->xsk, xsk_raw_len, &enc_xsk, &enc_xsk_len));
+    if (!wrapped.ok)
+        LOG_FAIL("wallet_sqlite", "write_sapling_key: %s", wrapped.message);
 
     sqlite3_stmt *s = ws->stmt_zkey_write;
     sqlite3_reset(s);
     sqlite3_bind_blob(s, 1, entry->ivk, 32, SQLITE_STATIC);
-    if (encrypted)
+    if (enc_xsk)
         sqlite3_bind_blob(s, 2, enc_xsk, (int)enc_xsk_len, SQLITE_TRANSIENT);
     else
         sqlite3_bind_blob(s, 2, &entry->xsk, (int)xsk_raw_len, SQLITE_STATIC);

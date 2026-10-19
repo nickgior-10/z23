@@ -45,6 +45,9 @@ struct wallet;
 struct wallet_sqlite;
 struct json_value;
 
+/* Shared bound for the runtime register and cleansable caller snapshots. */
+#define WLK_MAX_PASS 512
+
 /* Typed error codes for the lock surface (negative, distinct from the
  * wallet_sqlite WSQL_* range). */
 enum wallet_lock_err {

@@ -958,6 +958,86 @@ static int test_wkd1_batch_and_row_swap_authentication(void)
 
 /* ── Entry point ─────────────────────────────────────────────── */
 
+static bool sapling_secret_rows_unchanged(sqlite3 *db)
+{
+    const char *sql =
+        "SELECT NOT EXISTS(SELECT * FROM wallet_seed EXCEPT SELECT * FROM before_seed)"
+        " AND NOT EXISTS(SELECT * FROM before_seed EXCEPT SELECT * FROM wallet_seed)"
+        " AND NOT EXISTS(SELECT * FROM wallet_sapling_keys EXCEPT SELECT * FROM before_keys)"
+        " AND NOT EXISTS(SELECT * FROM before_keys EXCEPT SELECT * FROM wallet_sapling_keys)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW &&
+              sqlite3_column_int(stmt, 0) == 1;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+/* A failed encryption must neither overwrite an encrypted secret with raw
+ * bytes nor advance child metadata. Exercise the public persistence APIs. */
+static int test_sapling_secret_write_fail_closed(bool key)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stored = NULL;
+    struct wallet_sqlite ws = {0};
+    TEST(key ? "wallet_sqlite_enc: spending-key writes fail closed" :
+               "wallet_sqlite_enc: seed writes fail closed") {
+        set_passphrase("sapling-fail-closed");
+        db = open_mem_db();
+        ASSERT(db);
+        ASSERT(wallet_sqlite_open(&ws, db));
+        uint8_t seed[32];
+        memset(seed, 0x34, sizeof(seed));
+        struct sapling_key_entry entry;
+        memset(&entry, 0, sizeof(entry));
+        memset(entry.ivk, 0x45, sizeof(entry.ivk));
+        memset(&entry.xsk, 0x56, sizeof(entry.xsk));
+        ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        ASSERT(wallet_sqlite_write_sapling_key(&ws, 0, &entry));
+        ASSERT(sqlite3_exec(db,
+            "CREATE TEMP TABLE before_seed AS SELECT * FROM wallet_seed;"
+            "CREATE TEMP TABLE before_keys AS SELECT * FROM wallet_sapling_keys;",
+            NULL, NULL, NULL) == SQLITE_OK);
+        memset(seed, 0x67, sizeof(seed));
+        memset(&entry.xsk, 0x78, sizeof(entry.xsk));
+        zcl_alloc_fault_fail_next("wallet_encrypt_buf");
+        bool wrote = key ? wallet_sqlite_write_sapling_key(&ws, 99, &entry)
+                         : wallet_sqlite_write_sapling_seed(&ws, seed);
+        zcl_alloc_fault_clear();
+        ASSERT(!wrote);
+        ASSERT(ws.last_error[0] != '\0');
+        ASSERT(sapling_secret_rows_unchanged(db));
+        ASSERT(sqlite3_txn_state(db, NULL) == SQLITE_TXN_NONE);
+        wallet_lock_lock(NULL);
+        wrote = key ? wallet_sqlite_write_sapling_key(&ws, 99, &entry)
+                    : wallet_sqlite_write_sapling_seed(&ws, seed);
+        ASSERT(!wrote);
+        ASSERT(ws.last_error[0] != '\0');
+        ASSERT(sapling_secret_rows_unchanged(db));
+        ASSERT(sqlite3_txn_state(db, NULL) == SQLITE_TXN_NONE);
+        ASSERT(wallet_lock_unlock(NULL, NULL, "sapling-fail-closed").ok);
+        ASSERT(key ? wallet_sqlite_write_sapling_key(&ws, 99, &entry)
+                   : wallet_sqlite_write_sapling_seed(&ws, seed));
+        ASSERT(!sapling_secret_rows_unchanged(db));
+        ASSERT(sqlite3_prepare_v2(db, key
+            ? "SELECT xsk FROM wallet_sapling_keys"
+            : "SELECT seed FROM wallet_seed", -1, &stored, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_step(stored) == SQLITE_ROW);
+        ASSERT(sqlite3_column_bytes(stored, 0) >= WKS_HEADER_LEN);
+        ASSERT(memcmp(sqlite3_column_blob(stored, 0), WKS_MAGIC,
+                       WKS_MAGIC_LEN) == 0);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    if (stored) sqlite3_finalize(stored);
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (db) sqlite3_close(db);
+    set_passphrase(NULL);
+    return failures;
+}
+
 int test_wallet_sqlite_enc(void);
 
 int test_wallet_sqlite_enc(void)
@@ -981,6 +1061,8 @@ int test_wallet_sqlite_enc(void)
     failures += test_scrub_noop_without_passphrase();
     failures += test_legacy_wks1_migrates_and_restarts();
     failures += test_wkd1_batch_and_row_swap_authentication();
+    failures += test_sapling_secret_write_fail_closed(false);
+    failures += test_sapling_secret_write_fail_closed(true);
 
     /* Cleanup: scrub the test unlock register. */
     set_passphrase(NULL);
