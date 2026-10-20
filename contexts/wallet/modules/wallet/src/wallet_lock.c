@@ -21,11 +21,6 @@
 #include <string.h>
 #include <time.h>
 
-/* Bound the cached passphrase so it lives in a fixed, cleansable buffer
- * (no heap copy of the secret to chase). 512 bytes is far past any real
- * passphrase and still fits the WKS PBKDF2 input. */
-#define WLK_MAX_PASS 512
-
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* All fields guarded by g_mu. */
